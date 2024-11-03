@@ -6,8 +6,9 @@ int main(int argc, char *argv[])
     bitcask::BitcaskDb db;
     db.open("data");
     db.put("foo", "bar1");
-    db.put("foo2", "bar22");
+    db.put("foo", "bar22");
 
-    std::cout << "result: " << db.getString("foo");
+    db.dumpIndex();
+    std::cout << "result: " << db.getString("foo") << std::endl;
     db.close();
 }

@@ -53,10 +53,13 @@ namespace bitcask
         void remove(keySize_t keySize, void *keyData);
         void close();
 
+        void dumpIndex();
+
     private:
         std::filesystem::path dbPath;
-        std::unordered_map<hash_t, std::vector<offset_t>> currentOffsets;
-        std::fstream currentLogFile;
+        std::unordered_multimap<hash_t, offset_t> currentOffsets;
+        std::filebuf currentLogFile;
+        bool compareKey(offset_t offset, keySize_t keySize, void *keyData, valueSize_t &valueSize);
     };
 
     struct BitcaskKey
