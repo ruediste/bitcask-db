@@ -2,10 +2,7 @@
 #include <cstddef>
 #include <string>
 #include <unordered_map>
-#include <iostream>
-#include <fstream>
 #include <filesystem>
-#include <vector>
 
 namespace bitcask
 {
@@ -16,7 +13,7 @@ namespace bitcask
     class BitcaskDb
     {
     public:
-        void open(const std::filesystem::path &dbPath);
+        bool open(const std::filesystem::path &dbPath);
         void put(keySize_t keySize, void *keyData, valueSize_t valueSize, void *valueData);
         void put(std::string key, std::string value)
         {
@@ -51,15 +48,16 @@ namespace bitcask
         }
 
         void remove(keySize_t keySize, void *keyData);
-        void close();
+        bool close();
 
         void dumpIndex();
 
     private:
         std::filesystem::path dbPath;
         std::unordered_multimap<hash_t, offset_t> currentOffsets;
-        std::filebuf currentLogFile;
+        int currentLogFile;
         bool compareKey(offset_t offset, keySize_t keySize, void *keyData, valueSize_t &valueSize);
+        void insertToCurrentIndex(bitcask::keySize_t keySize, void *keyData, offset_t offset);
     };
 
     struct BitcaskKey
