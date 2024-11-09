@@ -47,3 +47,25 @@ TEST(OpenDB, TruncateDb)
         db.close();
     }
 }
+TEST(OpenDB, RotateCurrentLog)
+{
+    auto dir = createTestDataDir();
+    bitcask::BitcaskDb db;
+    db.open(dir);
+
+    db.put("foo", "bar");
+
+    db.rotateCurrentLogFile();
+
+    // ASSERT_EQ(db.getString("foo"), "bar");
+    db.put("foo1", "bar1");
+    // ASSERT_EQ(db.getString("foo"), "bar");
+    ASSERT_EQ(db.getString("foo1"), "bar1");
+    db.close();
+
+    db = bitcask::BitcaskDb();
+    db.open(dir);
+    // ASSERT_EQ(db.getString("foo"), "bar");
+    // ASSERT_EQ(db.getString("foo1"), "bar1");
+    db.close();
+}

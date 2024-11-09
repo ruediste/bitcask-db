@@ -3,6 +3,7 @@
 #include <string>
 #include <unordered_map>
 #include <filesystem>
+#include <vector>
 
 namespace bitcask
 {
@@ -69,12 +70,20 @@ namespace bitcask
 
         void dumpIndex();
 
+        void rotateCurrentLogFile();
+
     private:
         std::filesystem::path dbPath;
         std::unordered_multimap<hash_t, offset_t> currentOffsets;
         int currentLogFile;
         bool compareKey(offset_t offset, keySize_t keySize, void *keyData, valueSize_t &valueSize);
         void insertToCurrentIndex(bitcask::keySize_t keySize, void *keyData, offset_t offset);
+
+        /** File descriptors for the log files, without the current log file */
+        std::vector<int> logFiles;
+        int nextLogFileNr = 0;
+
+        void openCurrentLogFile();
     };
 
     struct BitcaskKey

@@ -6,6 +6,7 @@
 #include <fcntl.h>
 #include <iostream>
 #include <memory>
+#include <regex>
 
 namespace bitcask
 {
@@ -13,6 +14,11 @@ namespace bitcask
     {
         return xxh::xxhash<32>(data, size);
         // return 3;
+    }
+
+    std::system_error errno_error(const char *what)
+    {
+        return std::system_error(errno, std::generic_category(), what);
     }
 
     /**
@@ -114,22 +120,73 @@ namespace bitcask
         return total;
     }
 
+    template <typename T>
+    size_t pReadFully(int fd, std::unique_ptr<T> &buf, size_t size, offset_t offset, bool failOnEof = true)
+    {
+        return pReadFully(fd, buf.get(), size, offset, failOnEof);
+    }
+
     struct EntryHeader
     {
         keySize_t keySize;
         valueSize_t valueSize;
     } __attribute__((packed));
 
-    std::system_error errno_error(const char *what)
-    {
-        return std::system_error(errno, std::generic_category(), what);
-    }
-
     void BitcaskDb::open(const std::filesystem::path &path)
     {
         dbPath = path;
         std::filesystem::create_directories(path);
-        currentLogFile = ::open((path / "current.log").c_str(), O_RDWR | O_CREAT, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
+        std::vector<int> logFileNumbers;
+
+        // read all file names in directory
+        for (const auto &entry : std::filesystem::directory_iterator(path))
+        {
+            if (entry.is_regular_file())
+            {
+                const std::string filename = entry.path().filename().string();
+                std::cout << filename << std::endl;
+
+                const std::regex logFileRegex("(\\d+).log");
+                std::smatch match;
+                if (std::regex_match(filename, match, logFileRegex))
+                {
+                    int nr = std::stoi(match[1].str());
+                    std::cout << "log file: " << nr << std::endl;
+                    logFileNumbers.push_back(nr);
+                }
+            }
+        }
+
+        // sort files
+        std::sort(logFileNumbers.begin(), logFileNumbers.end());
+
+        // determine next log file number
+        if (logFileNumbers.size() > 0)
+        {
+            nextLogFileNr = logFileNumbers[logFileNumbers.size() - 1] + 1;
+        }
+
+        openCurrentLogFile();
+    }
+
+    void BitcaskDb::rotateCurrentLogFile()
+    {
+        // move current.log to next log file
+        if (std::rename((dbPath / "current.log").c_str(), (dbPath / (std::to_string(nextLogFileNr++) + ".log")).c_str()))
+        {
+            throw errno_error("rename current.log");
+        }
+
+        currentOffsets.clear();
+
+        // TODO: create index
+
+        openCurrentLogFile();
+    }
+
+    void BitcaskDb::openCurrentLogFile()
+    {
+        currentLogFile = ::open((dbPath / "current.log").c_str(), O_RDWR | O_CREAT, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
         if (currentLogFile == -1)
         {
             throw errno_error("failed to open current.log");
@@ -273,25 +330,9 @@ namespace bitcask
         }
 
         // read key
-        char *keyFromFile = (char *)malloc(keySize);
+        std::unique_ptr<uint8_t> keyFromFile(new uint8_t[keySize]);
         bytesRead = pReadFully(currentLogFile, keyFromFile, keySize, offset + sizeof(header));
-        if (bytesRead != keySize)
-        {
-            return false;
-        }
-
-        // compare keyData with the key in the file
-        for (keySize_t i = 0; i < keySize; i++)
-        {
-            if (keyFromFile[i] != reinterpret_cast<char *>(keyData)[i])
-            {
-                free(keyFromFile);
-                return false;
-            }
-        }
-
-        free(keyFromFile);
-        return true;
+        return memcmp(keyFromFile.get(), keyData, keySize) == 0;
     }
 
     void BitcaskDb::dumpIndex()
