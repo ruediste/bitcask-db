@@ -10,31 +10,48 @@ namespace bitcask
     typedef uint32_t valueSize_t;
     typedef uint32_t hash_t;
     typedef uint32_t offset_t;
+
+    struct DataBuffer
+    {
+        size_t size;
+        void *data;
+
+        DataBuffer(size_t size)
+        {
+            this->size = size;
+            this->data = malloc(size);
+        }
+
+        ~DataBuffer()
+        {
+            free(data);
+        }
+    };
+
     class BitcaskDb
     {
     public:
-        bool open(const std::filesystem::path &dbPath);
+        void open(const std::filesystem::path &dbPath);
         void put(keySize_t keySize, void *keyData, valueSize_t valueSize, void *valueData);
         void put(std::string key, std::string value)
         {
             this->put(key.size(), (void *)key.c_str(), value.size(), (void *)value.c_str());
         }
-        bool get(keySize_t keySize, void *keyData, valueSize_t &valueSize, void *&valueData);
-        bool get(const std::string &key, valueSize_t &valueSize, void *&valueData)
+        std::unique_ptr<DataBuffer> get(keySize_t keySize, void *keyData);
+        std::unique_ptr<DataBuffer> get(const std::string &key)
         {
-            return this->get(key.size(), (void *)key.c_str(), valueSize, valueData);
+            return this->get(key.size(), (void *)key.c_str());
         }
 
         bool get(const std::string &key, std::string &result)
         {
-            valueSize_t valueSize;
-            void *valueData;
-            auto found = this->get(key.size(), (void *)key.c_str(), valueSize, valueData);
+            auto found = this->get(key.size(), (void *)key.c_str());
             if (found)
             {
-                result = std::string((char *)valueData, valueSize);
+                result = std::string((char *)found->data, found->size);
+                return true;
             }
-            return found;
+            return false;
         }
 
         std::string getString(const std::string &key)
@@ -48,7 +65,7 @@ namespace bitcask
         }
 
         void remove(keySize_t keySize, void *keyData);
-        bool close();
+        void close();
 
         void dumpIndex();
 

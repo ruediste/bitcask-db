@@ -5,6 +5,7 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <iostream>
+#include <memory>
 
 namespace bitcask
 {
@@ -14,80 +15,99 @@ namespace bitcask
         // return 3;
     }
 
-    size_t readFully(int fd, char *buf, size_t size)
+    /**
+     * Read a given amount of data from a file. If there are any errors, an exception is thrown.
+     * If failOnEof is true (default), an exception is thrown if EOF is reached before the requested amount of data is read.
+     * The function always reads the given number of bytes and returns this value.
+     *
+     * If failOnEof is false, the function returns the number of bytes read, which may be less than the requested amount.
+     */
+    size_t readFully(int fd, void *buf, size_t size, bool failOnEof = true)
     {
         size_t total = 0;
         while (total < size)
         {
-            ssize_t n = read(fd, buf + total, size - total);
+            ssize_t n = read(fd, ((uint8_t *)buf) + total, size - total);
             if (n == -1)
             {
                 if (errno == EINTR)
                 {
                     continue;
                 }
-                perror("read");
-                if (total == 0)
-                {
-                    return -1;
-                }
-                return total;
+
+                throw std::system_error();
             }
             if (n == 0)
             {
-                return total;
+                // EOF is reached
+                if (failOnEof)
+                {
+                    throw std::runtime_error("Unexpected EOF");
+                }
+                else
+                    return total;
             }
             total += n;
         }
         return total;
     }
 
-    size_t writeFully(int fd, char *buf, size_t size)
+    template <typename T>
+    size_t readFully(int fd, std::unique_ptr<T> &buf, size_t size, bool failOnEof = true)
+    {
+        return readFully(fd, buf.get(), size, failOnEof);
+    }
+
+    /** Write the given amount of data. Throw an exception if an error occurs */
+    void writeFully(int fd, void *buf, size_t size)
     {
         size_t total = 0;
         while (total < size)
         {
-            ssize_t n = write(fd, buf + total, size - total);
+            ssize_t n = write(fd, ((uint8_t *)buf) + total, size - total);
             if (n == -1)
             {
                 if (errno == EINTR)
                 {
                     continue;
                 }
-                perror("write");
-                if (total == 0)
-                {
-                    return -1;
-                }
-                return total;
+                throw std::runtime_error("write fully");
             }
             total += n;
         }
-        return total;
     }
 
-    size_t pReadFully(int fd, char *buf, size_t size, offset_t offset)
+    /**
+     * Read a given amount of data from a file. If there are any errors, an exception is thrown.
+     * If failOnEof is true (default), an exception is thrown if EOF is reached before the requested amount of data is read.
+     * The function always reads the given number of bytes and returns this value.
+     *
+     * If failOnEof is false, the function returns the number of bytes read, which may be less than the requested amount.
+     */
+    size_t pReadFully(int fd, void *buf, size_t size, offset_t offset, bool failOnEof = true)
     {
         size_t total = 0;
         while (total < size)
         {
-            ssize_t n = pread(fd, buf + total, size - total, offset + total);
+            ssize_t n = pread(fd, ((uint8_t *)buf) + total, size - total, offset + total);
             if (n == -1)
             {
                 if (errno == EINTR)
                 {
                     continue;
                 }
-                perror("pread");
-                if (total == 0)
-                {
-                    return -1;
-                }
-                return total;
+
+                throw std::system_error();
             }
             if (n == 0)
             {
-                return total;
+                // EOF is reached
+                if (failOnEof)
+                {
+                    throw std::runtime_error("Unexpected EOF");
+                }
+                else
+                    return total;
             }
             total += n;
         }
@@ -100,30 +120,32 @@ namespace bitcask
         valueSize_t valueSize;
     } __attribute__((packed));
 
-    bool BitcaskDb::open(const std::filesystem::path &path)
+    std::system_error errno_error(const char *what)
+    {
+        return std::system_error(errno, std::generic_category(), what);
+    }
+
+    void BitcaskDb::open(const std::filesystem::path &path)
     {
         dbPath = path;
         std::filesystem::create_directories(path);
         currentLogFile = ::open((path / "current.log").c_str(), O_RDWR | O_CREAT, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
         if (currentLogFile == -1)
         {
-            perror("open");
-            return false;
+            throw errno_error("failed to open current.log");
         }
 
         // read file size
         struct stat st;
         if (fstat(currentLogFile, &st) == -1)
         {
-            perror("fstat");
-            return false;
+            throw errno_error("read file size");
         }
 
         // build index from log file
         if (lseek(currentLogFile, 0, SEEK_SET) == -1)
         {
-            perror("lseek");
-            return false;
+            throw errno_error("seek to beginning");
         }
 
         while (true)
@@ -132,68 +154,56 @@ namespace bitcask
             auto offset = lseek64(currentLogFile, 0, SEEK_CUR);
             if (offset == -1)
             {
-                perror("lseek");
-                return false;
+                throw errno_error("get offset");
             }
 
             EntryHeader header;
-            auto bytesRead = readFully(currentLogFile, reinterpret_cast<char *>(&header), sizeof(header));
-
-            if (bytesRead == -1) // Error
-            {
-                return false;
-            }
+            auto bytesRead = readFully(currentLogFile, &header, sizeof(header), false);
 
             if (bytesRead < sizeof(header)) // EOF or truncated file
             {
-                lseek64(currentLogFile, offset, SEEK_SET);
+                if (lseek64(currentLogFile, offset, SEEK_SET) == -1)
+                {
+                    throw errno_error("seek to offset");
+                }
                 break;
             }
 
-            char *keyData = (char *)malloc(header.keySize);
-            bytesRead = readFully(currentLogFile, keyData, header.keySize);
-            if (bytesRead == -1)
-            {
-                free(keyData);
-                return false;
-            }
+            std::unique_ptr<uint8_t> keyData(new uint8_t[header.keySize]);
+
+            bytesRead = readFully(currentLogFile, keyData, header.keySize, false);
 
             if (bytesRead < header.keySize) // truncated file
             {
-                free(keyData);
-                lseek64(currentLogFile, offset, SEEK_SET);
+                if (lseek64(currentLogFile, offset, SEEK_SET) == -1)
+                {
+                    throw errno_error("seek to offset");
+                }
                 break;
             }
 
             auto pos = lseek64(currentLogFile, header.valueSize, SEEK_CUR); // skip value
-            if (pos == -1)
-            {
-                free(keyData);
-                perror("lseek");
-                return false;
-            }
 
             if (pos > st.st_size) // truncated file
             {
-                free(keyData);
-                lseek64(currentLogFile, offset, SEEK_SET);
+                if (lseek64(currentLogFile, offset, SEEK_SET) == -1)
+                {
+                    throw errno_error("seek to offset");
+                }
                 break;
             }
 
-            insertToCurrentIndex(header.keySize, keyData, offset);
-            free(keyData);
+            insertToCurrentIndex(header.keySize, keyData.get(), offset);
         }
-        return true;
     }
 
-    bool BitcaskDb::close()
+    void BitcaskDb::close()
     {
         if (::close(currentLogFile) == -1)
         {
-            perror("close");
-            return false;
+            throw errno_error("close current.log");
         }
-        return true;
+        currentOffsets.clear();
     }
 
     void BitcaskDb::put(keySize_t keySize, void *keyData, valueSize_t valueSize, void *valueData)
@@ -201,9 +211,9 @@ namespace bitcask
         auto offset = lseek64(currentLogFile, 0, SEEK_CUR);
 
         EntryHeader header = {keySize, valueSize};
-        writeFully(currentLogFile, reinterpret_cast<char *>(&header), sizeof(header));
-        writeFully(currentLogFile, reinterpret_cast<char *>(keyData), keySize);
-        writeFully(currentLogFile, reinterpret_cast<char *>(valueData), valueSize);
+        writeFully(currentLogFile, &header, sizeof(header));
+        writeFully(currentLogFile, keyData, keySize);
+        writeFully(currentLogFile, valueData, valueSize);
         insertToCurrentIndex(keySize, keyData, offset);
     }
 
@@ -227,7 +237,7 @@ namespace bitcask
         currentOffsets.insert({h, offset});
     }
 
-    bool BitcaskDb::get(keySize_t keySize, void *keyData, valueSize_t &valueSize, void *&valueData)
+    std::unique_ptr<DataBuffer> BitcaskDb::get(keySize_t keySize, void *keyData)
     {
         auto offsets = currentOffsets.find(hash(keySize, keyData));
         for (; offsets != currentOffsets.end(); offsets++)
@@ -239,17 +249,11 @@ namespace bitcask
             }
 
             // extract value
-            valueData = malloc(vSize);
-            auto bytesRead = pReadFully(currentLogFile, reinterpret_cast<char *>(valueData), vSize, offsets->second + sizeof(EntryHeader) + keySize);
-            if (bytesRead != vSize)
-            {
-                free(valueData);
-                return false;
-            }
-            valueSize = vSize;
-            return true;
+            std::unique_ptr<DataBuffer> buffer(new DataBuffer(vSize));
+            pReadFully(currentLogFile, buffer->data, vSize, offsets->second + sizeof(EntryHeader) + keySize);
+            return buffer;
         }
-        return false;
+        return NULL;
     }
 
     bool BitcaskDb::compareKey(offset_t offset, keySize_t keySize, void *keyData, valueSize_t &valueSize)
