@@ -3,7 +3,7 @@
 #include <string>
 #include <unordered_map>
 #include <filesystem>
-#include <vector>
+#include <queue>
 #include <cpptrace/cpptrace.hpp>
 
 namespace bitcask
@@ -77,11 +77,9 @@ namespace bitcask
         std::filesystem::path dbPath;
         std::unordered_multimap<hash_t, offset_t> currentOffsets;
         int currentLogFile;
-        bool compareKey(offset_t offset, keySize_t keySize, void *keyData, valueSize_t &valueSize);
+        bool compareKey(int fd, offset_t offset, keySize_t keySize, void *keyData, valueSize_t &valueSize);
         void insertToCurrentIndex(bitcask::keySize_t keySize, void *keyData, offset_t offset);
 
-        /** File descriptors for the log files, without the current log file */
-        std::vector<int> logFiles;
         int nextSegmentNr = 0;
 
         void openCurrentLogFile();
@@ -102,6 +100,18 @@ namespace bitcask
             return 1 + offsetsPerBucket * sizeof(offset_t);
         }
         void writeToIndex(int fd, int bucketCount, hash_t hash, offset_t offset);
+
+        struct Segment
+        {
+            int segmentNr;
+            int logFileFd;
+            int indexFileFd;
+            int indexBucketCount;
+        };
+
+        /** Segments without the current log file, in reverse order */
+        std::deque<Segment> segments;
+        Segment loadSegment(int nr);
     };
 
     struct BitcaskKey

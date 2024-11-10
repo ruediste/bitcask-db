@@ -16,9 +16,9 @@ namespace bitcask
         // return 3;
     }
 
-    cpptrace::system_error errno_error(const char *what)
+    cpptrace::system_error errno_error(std::string &&what)
     {
-        return cpptrace::system_error(errno, what);
+        return cpptrace::system_error(errno, std::move(what));
     }
 
     /**
@@ -145,11 +145,38 @@ namespace bitcask
         }
     }
 
-    struct EntryHeader
+    struct IndexFileHeader
+    {
+        uint32_t buckets;
+    } __attribute((packed));
+
+    struct LogEntryHeader
     {
         keySize_t keySize;
         valueSize_t valueSize;
     } __attribute__((packed));
+
+    BitcaskDb::Segment BitcaskDb::loadSegment(int nr)
+    {
+        Segment segment;
+        segment.segmentNr = nr;
+        segment.logFileFd = ::open(logFileName(nr).c_str(), O_RDONLY);
+        if (segment.logFileFd == -1)
+        {
+            throw errno_error("open log file " + logFileName(nr).string());
+        }
+
+        segment.indexFileFd = ::open(indexFileName(nr).c_str(), O_RDONLY);
+        if (segment.indexFileFd == -1)
+        {
+            throw errno_error("open index file " + indexFileName(nr).string());
+        }
+
+        IndexFileHeader header;
+        pReadFully(segment.indexFileFd, &header, sizeof(IndexFileHeader), 0);
+        segment.indexBucketCount = header.buckets;
+        return segment;
+    }
 
     void BitcaskDb::open(const std::filesystem::path &path)
     {
@@ -163,14 +190,12 @@ namespace bitcask
             if (entry.is_regular_file())
             {
                 const std::string filename = entry.path().filename().string();
-                std::cout << filename << std::endl;
 
                 const std::regex logFileRegex("(\\d+).log");
                 std::smatch match;
                 if (std::regex_match(filename, match, logFileRegex))
                 {
                     int nr = std::stoi(match[1].str());
-                    std::cout << "log file: " << nr << std::endl;
                     logFileNumbers.push_back(nr);
                 }
             }
@@ -184,6 +209,13 @@ namespace bitcask
         {
             nextSegmentNr = logFileNumbers[logFileNumbers.size() - 1] + 1;
         }
+
+        // open segments files
+        for (int nr : logFileNumbers)
+        {
+            segments.push_back(loadSegment(nr));
+        }
+        std::reverse(segments.begin(), segments.end());
 
         openCurrentLogFile();
     }
@@ -221,7 +253,7 @@ namespace bitcask
 
         // read bucket
         std::unique_ptr<uint8_t> bucketData(new uint8_t[bucketSize()]);
-        pReadFully(fd, bucketData, bucketSize(), bucket * bucketSize());
+        pReadFully(fd, bucketData, bucketSize(), sizeof(IndexFileHeader) + bucket * bucketSize());
 
         for (int i = 0; i < offsetsPerBucket; i++)
         {
@@ -230,7 +262,7 @@ namespace bitcask
             {
                 // empty slot
                 *offsetFromBucket = offset;
-                pwrite(fd, bucketData.get(), bucketSize(), bucket * bucketSize());
+                pwrite(fd, bucketData.get(), bucketSize(), sizeof(IndexFileHeader) + bucket * bucketSize());
                 return;
             }
         }
@@ -255,11 +287,17 @@ namespace bitcask
                 throw errno_error("failed to create index file");
             }
 
-            if (posix_fallocate64(indexFd, 0, bucketCount * bucketSize()))
+            if (posix_fallocate64(indexFd, 0, sizeof(IndexFileHeader) + bucketCount * bucketSize()))
             {
                 throw errno_error("fallocate");
             }
 
+            // write header
+            IndexFileHeader header;
+            header.buckets = bucketCount;
+            pWriteFully(indexFd, &header, sizeof(header), 0);
+
+            // seek log to beginning
             if (lseek64(logFd, 1, SEEK_SET) == -1)
             {
                 throw errno_error("seek to beginning");
@@ -270,7 +308,7 @@ namespace bitcask
             {
                 auto offset = lseek64(logFd, 0, SEEK_CUR);
 
-                EntryHeader header;
+                LogEntryHeader header;
                 auto bytesRead = readFully(logFd, &header, sizeof(header), false);
 
                 if (bytesRead < sizeof(header)) // EOF reached
@@ -308,11 +346,9 @@ namespace bitcask
         }
 
         buildIndexFile(segmentNr);
+        segments.push_front(loadSegment(segmentNr));
 
         currentOffsets.clear();
-
-        // TODO: create index
-
         openCurrentLogFile();
     }
 
@@ -348,7 +384,7 @@ namespace bitcask
                 throw errno_error("get offset");
             }
 
-            EntryHeader header;
+            LogEntryHeader header;
             auto bytesRead = readFully(currentLogFile, &header, sizeof(header), false);
 
             if (bytesRead < sizeof(header)) // EOF or truncated file
@@ -394,6 +430,22 @@ namespace bitcask
         {
             throw errno_error("close current.log");
         }
+
+        // close log files
+        for (auto segment : segments)
+        {
+            if (::close(segment.logFileFd) == -1)
+            {
+                throw errno_error("close log file");
+            }
+
+            if (::close(segment.indexFileFd) == -1)
+            {
+                throw errno_error("close index file");
+            }
+        }
+        segments.clear();
+
         currentOffsets.clear();
     }
 
@@ -401,7 +453,7 @@ namespace bitcask
     {
         auto offset = lseek64(currentLogFile, 0, SEEK_CUR);
 
-        EntryHeader header = {keySize, valueSize};
+        LogEntryHeader header = {keySize, valueSize};
         writeFully(currentLogFile, &header, sizeof(header));
         writeFully(currentLogFile, keyData, keySize);
         writeFully(currentLogFile, valueData, valueSize);
@@ -417,7 +469,7 @@ namespace bitcask
         for (; offsets != currentOffsets.end(); offsets++)
         {
             valueSize_t vSize;
-            if (compareKey(offsets->second, keySize, keyData, vSize))
+            if (compareKey(currentLogFile, offsets->second, keySize, keyData, vSize))
             {
                 offsets->second = offset;
                 return;
@@ -430,32 +482,55 @@ namespace bitcask
 
     std::unique_ptr<DataBuffer> BitcaskDb::get(keySize_t keySize, void *keyData)
     {
-        auto offsets = currentOffsets.find(hash(keySize, keyData));
+        auto keyHash = hash(keySize, keyData);
+        // search current segment
+        auto offsets = currentOffsets.find(keyHash);
         for (; offsets != currentOffsets.end(); offsets++)
         {
-            valueSize_t vSize;
-            if (!compareKey(offsets->second, keySize, keyData, vSize))
+            valueSize_t valueSize;
+            if (!compareKey(currentLogFile, offsets->second, keySize, keyData, valueSize))
             {
                 continue;
             }
 
             // extract value
-            std::unique_ptr<DataBuffer> buffer(new DataBuffer(vSize));
-            pReadFully(currentLogFile, buffer->data, vSize, offsets->second + sizeof(EntryHeader) + keySize);
+            std::unique_ptr<DataBuffer> buffer(new DataBuffer(valueSize));
+            pReadFully(currentLogFile, buffer->data, valueSize, offsets->second + sizeof(LogEntryHeader) + keySize);
             return buffer;
+        }
+
+        // search older segments
+        for (auto segment : segments)
+        {
+            int bucket = keyHash % segment.indexBucketCount;
+
+            // read bucket
+            std::unique_ptr<uint8_t> bucketData(new uint8_t[bucketSize()]);
+            pReadFully(segment.indexFileFd, bucketData, bucketSize(), sizeof(IndexFileHeader) + bucket * bucketSize());
+
+            for (int i = 0; i < offsetsPerBucket; i++)
+            {
+                offset_t offset = *(reinterpret_cast<offset_t *>(bucketData.get() + 1 + i * sizeof(offset_t)));
+                if (offset != 0)
+                {
+                    valueSize_t valueSize;
+                    if (!compareKey(segment.logFileFd, offset, keySize, keyData, valueSize))
+                        continue;
+
+                    // extract value
+                    std::unique_ptr<DataBuffer> buffer(new DataBuffer(valueSize));
+                    pReadFully(segment.logFileFd, buffer->data, valueSize, offset + sizeof(LogEntryHeader) + keySize);
+                    return buffer;
+                }
+            }
         }
         return NULL;
     }
 
-    bool BitcaskDb::compareKey(offset_t offset, keySize_t keySize, void *keyData, valueSize_t &valueSize)
+    bool BitcaskDb::compareKey(int fd, offset_t offset, keySize_t keySize, void *keyData, valueSize_t &valueSize)
     {
-        EntryHeader header;
-        auto bytesRead = pReadFully(currentLogFile, reinterpret_cast<char *>(&header), sizeof(header), offset);
-        if (bytesRead != sizeof(header))
-        {
-            return false;
-        }
-
+        LogEntryHeader header;
+        pReadFully(fd, reinterpret_cast<char *>(&header), sizeof(header), offset);
         valueSize = header.valueSize;
 
         if (header.keySize != keySize)
@@ -465,7 +540,7 @@ namespace bitcask
 
         // read key
         std::unique_ptr<uint8_t> keyFromFile(new uint8_t[keySize]);
-        bytesRead = pReadFully(currentLogFile, keyFromFile, keySize, offset + sizeof(header));
+        pReadFully(fd, keyFromFile, keySize, offset + sizeof(header));
         return memcmp(keyFromFile.get(), keyData, keySize) == 0;
     }
 

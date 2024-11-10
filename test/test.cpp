@@ -58,14 +58,19 @@ TEST(OpenDB, RotateCurrentLog)
     db.rotateCurrentLogFile();
 
     ASSERT_EQ(db.getString("foo"), "bar");
+
+    std::string result;
+    ASSERT_FALSE(db.get("foo1", result));
+
     db.put("foo1", "bar1");
-    // ASSERT_EQ(db.getString("foo"), "bar");
+    ASSERT_EQ(db.getString("foo"), "bar");
     ASSERT_EQ(db.getString("foo1"), "bar1");
     db.close();
 
     db = bitcask::BitcaskDb();
     db.open(dir);
-    // ASSERT_EQ(db.getString("foo"), "bar");
-    // ASSERT_EQ(db.getString("foo1"), "bar1");
+    ASSERT_EQ(db.getString("foo"), "bar");
+    ASSERT_EQ(db.getString("foo1"), "bar1");
+    ASSERT_FALSE(db.get("foo2", result));
     db.close();
 }
