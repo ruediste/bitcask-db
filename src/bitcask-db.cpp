@@ -16,9 +16,9 @@ namespace bitcask
         // return 3;
     }
 
-    std::system_error errno_error(const char *what)
+    cpptrace::system_error errno_error(const char *what)
     {
-        return std::system_error(errno, std::generic_category(), what);
+        return cpptrace::system_error(errno, what);
     }
 
     /**
@@ -41,14 +41,14 @@ namespace bitcask
                     continue;
                 }
 
-                throw std::system_error();
+                throw errno_error("read");
             }
             if (n == 0)
             {
                 // EOF is reached
                 if (failOnEof)
                 {
-                    throw std::runtime_error("Unexpected EOF");
+                    throw cpptrace::logic_error("Unexpected EOF");
                 }
                 else
                     return total;
@@ -62,25 +62,6 @@ namespace bitcask
     size_t readFully(int fd, std::unique_ptr<T> &buf, size_t size, bool failOnEof = true)
     {
         return readFully(fd, buf.get(), size, failOnEof);
-    }
-
-    /** Write the given amount of data. Throw an exception if an error occurs */
-    void writeFully(int fd, void *buf, size_t size)
-    {
-        size_t total = 0;
-        while (total < size)
-        {
-            ssize_t n = write(fd, ((uint8_t *)buf) + total, size - total);
-            if (n == -1)
-            {
-                if (errno == EINTR)
-                {
-                    continue;
-                }
-                throw std::runtime_error("write fully");
-            }
-            total += n;
-        }
     }
 
     /**
@@ -103,14 +84,14 @@ namespace bitcask
                     continue;
                 }
 
-                throw std::system_error();
+                throw errno_error("pread");
             }
             if (n == 0)
             {
                 // EOF is reached
                 if (failOnEof)
                 {
-                    throw std::runtime_error("Unexpected EOF");
+                    throw cpptrace::logic_error("Unexpected EOF");
                 }
                 else
                     return total;
@@ -124,6 +105,44 @@ namespace bitcask
     size_t pReadFully(int fd, std::unique_ptr<T> &buf, size_t size, offset_t offset, bool failOnEof = true)
     {
         return pReadFully(fd, buf.get(), size, offset, failOnEof);
+    }
+
+    /** Write the given amount of data. Throw an exception if an error occurs */
+    void writeFully(int fd, void *buf, size_t size)
+    {
+        size_t total = 0;
+        while (total < size)
+        {
+            ssize_t n = write(fd, ((uint8_t *)buf) + total, size - total);
+            if (n == -1)
+            {
+                if (errno == EINTR)
+                {
+                    continue;
+                }
+                throw std::runtime_error("write fully");
+            }
+            total += n;
+        }
+    }
+
+    /** Write the given amount of data. Throw an exception if an error occurs */
+    void pWriteFully(int fd, void *buf, size_t size, offset_t offset)
+    {
+        size_t total = 0;
+        while (total < size)
+        {
+            ssize_t n = pwrite(fd, ((uint8_t *)buf) + total, size - total, offset + total);
+            if (n == -1)
+            {
+                if (errno == EINTR)
+                {
+                    continue;
+                }
+                throw std::runtime_error("write fully");
+            }
+            total += n;
+        }
     }
 
     struct EntryHeader
@@ -163,19 +182,132 @@ namespace bitcask
         // determine next log file number
         if (logFileNumbers.size() > 0)
         {
-            nextLogFileNr = logFileNumbers[logFileNumbers.size() - 1] + 1;
+            nextSegmentNr = logFileNumbers[logFileNumbers.size() - 1] + 1;
         }
 
         openCurrentLogFile();
     }
 
+    struct AutoCloseFd
+    {
+        int fd;
+        AutoCloseFd(int fd) : fd(fd)
+        {
+        }
+
+        ~AutoCloseFd() noexcept(false)
+        {
+
+            if (fd == -1)
+            {
+                // the file descriptor was not opened correctly, don't try to close
+                return;
+            }
+
+            if (close(fd))
+            {
+                throw errno_error("close fd");
+            }
+        }
+
+        AutoCloseFd(const AutoCloseFd &other) = delete;
+        AutoCloseFd &operator=(const AutoCloseFd other) = delete;
+        operator int() const { return fd; }
+    };
+
+    void BitcaskDb::writeToIndex(int fd, int bucketCount, hash_t hash, offset_t offset)
+    {
+        int bucket = hash % bucketCount;
+
+        // read bucket
+        std::unique_ptr<uint8_t> bucketData(new uint8_t[bucketSize()]);
+        pReadFully(fd, bucketData, bucketSize(), bucket * bucketSize());
+
+        for (int i = 0; i < offsetsPerBucket; i++)
+        {
+            offset_t *offsetFromBucket = reinterpret_cast<offset_t *>(bucketData.get() + 1 + i * sizeof(offset_t));
+            if (*offsetFromBucket == 0)
+            {
+                // empty slot
+                *offsetFromBucket = offset;
+                pwrite(fd, bucketData.get(), bucketSize(), bucket * bucketSize());
+                return;
+            }
+        }
+
+        // there was now free slot, throw for now
+        throw std::runtime_error("no free slot in bucket");
+    }
+
+    void BitcaskDb::buildIndexFile(int segmentNr)
+    {
+        AutoCloseFd logFd = ::open(logFileName(segmentNr).c_str(), O_RDONLY);
+        if (logFd == -1)
+        {
+            throw errno_error("open log");
+        }
+        int bucketCount = 8;
+        while (true)
+        {
+            AutoCloseFd indexFd = ::open(indexFileName(segmentNr).c_str(), O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
+            if (indexFd == -1)
+            {
+                throw errno_error("failed to create index file");
+            }
+
+            if (posix_fallocate64(indexFd, 0, bucketCount * bucketSize()))
+            {
+                throw errno_error("fallocate");
+            }
+
+            if (lseek64(logFd, 1, SEEK_SET) == -1)
+            {
+                throw errno_error("seek to beginning");
+            }
+
+            int keyCount = 0;
+            while (true)
+            {
+                auto offset = lseek64(logFd, 0, SEEK_CUR);
+
+                EntryHeader header;
+                auto bytesRead = readFully(logFd, &header, sizeof(header), false);
+
+                if (bytesRead < sizeof(header)) // EOF reached
+                {
+                    return;
+                }
+
+                std::unique_ptr<uint8_t> keyData(new uint8_t[header.keySize]);
+
+                bytesRead = readFully(logFd, keyData.get(), header.keySize);
+                auto pos = lseek64(logFd, header.valueSize, SEEK_CUR); // skip value
+
+                auto h = hash(header.keySize, keyData.get());
+
+                writeToIndex(indexFd, bucketCount, h, offset);
+                keyCount++;
+
+                if (keyCount >> bucketCount * 2)
+                {
+                    break;
+                }
+            }
+
+            bucketCount *= 2;
+        }
+    }
+
     void BitcaskDb::rotateCurrentLogFile()
     {
+        auto segmentNr = nextSegmentNr++;
         // move current.log to next log file
-        if (std::rename((dbPath / "current.log").c_str(), (dbPath / (std::to_string(nextLogFileNr++) + ".log")).c_str()))
+        if (std::rename((dbPath / "current.log").c_str(), logFileName(segmentNr).c_str()))
         {
             throw errno_error("rename current.log");
         }
+
+        buildIndexFile(segmentNr);
 
         currentOffsets.clear();
 
@@ -200,7 +332,9 @@ namespace bitcask
         }
 
         // build index from log file
-        if (lseek(currentLogFile, 0, SEEK_SET) == -1)
+
+        // Seek to beginning, skip one byte to avoid zero offsets
+        if (lseek(currentLogFile, 1, SEEK_SET) == -1)
         {
             throw errno_error("seek to beginning");
         }

@@ -1,6 +1,7 @@
 #include <iostream>
 #include "bitcask-db.hpp"
 #include <gtest/gtest.h>
+#include <gtest-internal-inl.h>
 
 #include "test.hpp"
 

@@ -4,6 +4,7 @@
 #include <unordered_map>
 #include <filesystem>
 #include <vector>
+#include <cpptrace/cpptrace.hpp>
 
 namespace bitcask
 {
@@ -60,7 +61,7 @@ namespace bitcask
             std::string result;
             if (!this->get(key, result))
             {
-                throw std::runtime_error("Key not found");
+                throw cpptrace::runtime_error("Key not found");
             }
             return result;
         }
@@ -81,9 +82,26 @@ namespace bitcask
 
         /** File descriptors for the log files, without the current log file */
         std::vector<int> logFiles;
-        int nextLogFileNr = 0;
+        int nextSegmentNr = 0;
 
         void openCurrentLogFile();
+        void buildIndexFile(int logFileNr);
+
+        std::filesystem::path logFileName(int nr)
+        {
+            return dbPath / (std::to_string(nr) + ".log");
+        }
+        std::filesystem::path indexFileName(int nr)
+        {
+            return dbPath / (std::to_string(nr) + ".idx");
+        }
+
+        int offsetsPerBucket = 4;
+        int bucketSize()
+        {
+            return 1 + offsetsPerBucket * sizeof(offset_t);
+        }
+        void writeToIndex(int fd, int bucketCount, hash_t hash, offset_t offset);
     };
 
     struct BitcaskKey

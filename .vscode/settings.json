@@ -1,5 +1,5 @@
 {
-  "cSpell.words": ["bitcask", "loff"],
+  "cSpell.words": ["bitcask", "cpptrace", "fallocate", "loff"],
   "files.associations": {
     "*.json": "jsonc",
     "array": "cpp",

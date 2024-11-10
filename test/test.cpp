@@ -57,7 +57,7 @@ TEST(OpenDB, RotateCurrentLog)
 
     db.rotateCurrentLogFile();
 
-    // ASSERT_EQ(db.getString("foo"), "bar");
+    ASSERT_EQ(db.getString("foo"), "bar");
     db.put("foo1", "bar1");
     // ASSERT_EQ(db.getString("foo"), "bar");
     ASSERT_EQ(db.getString("foo1"), "bar1");

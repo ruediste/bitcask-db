@@ -7,6 +7,8 @@ project(BitcaskDB VERSION 0.1)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
 
+include(FetchContent)
+
 ## add the CMapke Package Manager
 file(
   DOWNLOAD
@@ -19,8 +21,15 @@ include(${CMAKE_CURRENT_BINARY_DIR}/cmake/CPM.cmake)
 # add xxhash_cpp
 CPMAddPackage("gh:RedSpah/xxhash_cpp#ad24e1c174f855cfdebc22ad4e678fd3fee3b943")
 
+# add cpptrace
+FetchContent_Declare(
+  cpptrace
+  GIT_REPOSITORY https://github.com/jeremy-rifkin/cpptrace.git
+  GIT_TAG        v0.7.2 # <HASH or TAG>
+)
+FetchContent_MakeAvailable(cpptrace)
+
 # add googletest
-include(FetchContent)
 FetchContent_Declare(
   googletest
   URL https://github.com/google/googletest/archive/d144031940543e15423a25ae5a8a74141044862f.zip
@@ -33,7 +42,8 @@ FetchContent_MakeAvailable(googletest)
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 
 add_library(bitcask-db SHARED src/bitcask-db.cpp)
-target_link_libraries(bitcask-db PUBLIC xxhash_cpp)
+target_link_libraries(bitcask-db  xxhash_cpp  cpptrace::cpptrace)
+target_include_directories(bitcask-db PUBLIC ${cpptrace_SOURCE_DIR}/include)
 
 enable_testing()
 
@@ -43,8 +53,12 @@ target_link_libraries(
   bitcask-test
   bitcask-db
   GTest::gtest
-)
+  cpptrace::cpptrace
+  )
+
 target_include_directories(bitcask-test PUBLIC src)
+target_include_directories(bitcask-test PUBLIC ${gtest_SOURCE_DIR}/src)
 
 include(GoogleTest)
 gtest_discover_tests(bitcask-test)
+  
